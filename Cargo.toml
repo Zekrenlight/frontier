@@ -1,0 +1,20 @@
+[package]
+name = "mod-frontier"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Frontier for Sunrise: a minimap, a world map of where you have been, and waypoints."
+authors = ["Zekrenlight"]
+
+[lib]
+name = "mod_frontier"
+path = "src/lib.rs"
+
+[dependencies]
+# The pinned SDK's API crate, fetched into .sunrise/sdk/ by any `cargo sunrise-mod` command.
+sunrise-mod-api = { path = ".sunrise/sdk/api/crates/sunrise-mod-api" }
+
+[dev-dependencies]
+# Only for the test that makes every creature's face from the game's own model data.
+serde_json = "1"
