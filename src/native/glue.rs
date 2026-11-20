@@ -24,6 +24,9 @@ fn inputs(game: &Game<'_>) {
     let tab = game.keys.held(Action::Playerlist) || game.physical_keys.contains(&KeyCode::Tab);
     let playing = game.playing() && game.container.is_none() && game.mod_screen.is_none();
     radar::set_inputs(tab, game.debug && playing);
+    // The permission level the server gave this client (`LocalPlayer.permissions`): it says
+    // whether `/tp` may be used, for the world map's Teleport here.
+    radar::set_permission(game.ui.registries.permission);
 }
 
 /// Opens Frontier's page of Options > Mods....
@@ -84,7 +87,15 @@ fn nearby(game: &Game<'_>) {
             let face = match (&kind, w.faces) {
                 (_, false) => Face::None,
                 (Kind::Player, true) => Face::Player { name: label.clone() },
-                _ => face_of(game, m),
+                _ => {
+                    // A type a mod draws with its own renderer (`register_entity_renderers`)
+                    // looks nothing like the vanilla type it copies (its model and texture
+                    // here are the template's: a wandering trader's), so it gets no face made
+                    // from them: its marker image if its mod or a pack gives one, else a dot.
+                    let modded = super::native_entity_renderers::living_renderer(m).is_some();
+                    let own = if modded { Face::None } else { face_of(game, m) };
+                    Face::marker_or(m.kind.id.as_str(), own)
+                }
             };
             dots.push(Dot::new([p.x, p.y, p.z], kind, label, named, face));
             if dots.len() >= 384 {

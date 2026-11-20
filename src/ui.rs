@@ -157,17 +157,34 @@ pub struct MapMenu {
     pub pos: [i32; 3],
     /// The waypoint under the pointer, when it opened on one.
     pub waypoint: Option<usize>,
+    /// Its top line: the waypoint's name, else the biome there (in the game's language); none
+    /// where the biome isn't known (a spot never explored), and then only the coordinates show.
+    pub title: Option<String>,
+    /// The height *Teleport here* goes to: the ground there plus one (the cave layer's floor
+    /// in a cave view, the waypoint's own height on a waypoint); None where it isn't known,
+    /// and the command then keeps the player's height (`~`).
+    pub teleport_y: Option<i32>,
     pub items: Vec<MenuItem>,
 }
 
 pub const MENU_W: f32 = 132.0;
 pub const MENU_ROW: f32 = 13.0;
+/// The menu's head: a title line and the coordinates, or the coordinates alone.
 pub const MENU_HEAD: f32 = 26.0;
+pub const MENU_HEAD_SHORT: f32 = 16.0;
 
 impl MapMenu {
+    /// How tall its head is.
+    pub fn head(&self) -> f32 {
+        if self.title.is_some() {
+            MENU_HEAD
+        } else {
+            MENU_HEAD_SHORT
+        }
+    }
     /// The menu's rectangle on a `w` x `h` screen.
     pub fn rect(&self, w: f32, h: f32) -> [f32; 4] {
-        let mh = MENU_HEAD + self.items.len() as f32 * MENU_ROW + 3.0;
+        let mh = self.head() + self.items.len() as f32 * MENU_ROW + 3.0;
         let x = self.at[0].min(w - MENU_W - 2.0).max(2.0).floor();
         let y = self.at[1].min(h - mh - 2.0).max(2.0).floor();
         [x, y, MENU_W, mh]
@@ -178,12 +195,51 @@ impl MapMenu {
         if mx < x || mx >= x + mw {
             return None;
         }
-        let row = ((my - y - MENU_HEAD) / MENU_ROW).floor();
+        let row = ((my - y - self.head()) / MENU_ROW).floor();
         if row < 0.0 {
             return None;
         }
         self.items.get(row as usize).copied()
     }
+}
+
+/// The `/tp` line *Teleport here* sends: to the middle of block `(x, z)`, at height `y`, or at
+/// the player's own height (`~`) where the ground there isn't known.
+pub fn teleport_command(x: i32, y: Option<i32>, z: i32) -> String {
+    let y = y.map_or_else(|| "~".to_owned(), |y| y.to_string());
+    let mid = |v: i32| format!("{:.1}", f64::from(v) + 0.5);
+    format!("/tp @s {} {y} {}", mid(x), mid(z))
+}
+
+/// Whether *Teleport here* is offered: the setting is on, the player is in Creative or
+/// Spectator, and their permission level (when the game tells it) lets them use `/tp` (2,
+/// as vanilla's command needs). An unknown level offers it and lets the server answer.
+pub fn may_teleport(setting: bool, creative_or_spectator: bool, permission: Option<u8>) -> bool {
+    setting && creative_or_spectator && permission.is_none_or(|p| p >= 2)
+}
+
+/// The world map's top bar: its height, and the `?` button at its right end whose card lists
+/// the map's keys while the pointer is on it.
+pub const BAR_H: f32 = 14.0;
+pub fn help_button_rect(w: f32) -> [f32; 4] {
+    [(w - 16.0).max(0.0), 1.0, 14.0, 12.0]
+}
+/// How wide the bar's centred title may be on a `w`-wide screen: clear of the `?` button on
+/// both sides, so it stays centred.
+pub fn title_room(w: f32) -> f32 {
+    (w - 2.0 * 20.0).max(0.0)
+}
+/// The `?` card: `lines` lines, the longest `line_w` GUI pixels, under the button and kept on
+/// a `w` x `h` screen.
+pub fn help_card_rect(w: f32, h: f32, line_w: f32, lines: usize) -> [f32; 4] {
+    let cw = (line_w + 12.0).min(w - 4.0).max(0.0);
+    let ch = (lines as f32 * 10.0 + 8.0).min(h - BAR_H - 4.0).max(0.0);
+    let x = (w - 2.0 - cw).max(2.0);
+    [x, BAR_H + 2.0, cw, ch]
+}
+/// Whether `(mx, my)` is on rectangle `r`.
+pub fn inside(r: [f32; 4], mx: f32, my: f32) -> bool {
+    mx >= r[0] && mx < r[0] + r[2] && my >= r[1] && my < r[1] + r[3]
 }
 
 /// The world map's Surface | Cave switch: its rectangle on a `w`-wide screen (top left, under
@@ -287,8 +343,9 @@ pub enum Request {
     Settings,
     /// Closes the screen and opens chat with this typed in, not sent.
     Chat(String),
-    /// `/tp` to this spot (asked only of a player allowed to).
-    Teleport([i32; 3]),
+    /// `/tp` to the middle of block `(x, z)` at height `y` (`~`, the player's own, when None);
+    /// offered only to a player in Creative or Spectator who may use `/tp`.
+    Teleport { x: i32, y: Option<i32>, z: i32 },
 }
 
 pub struct Ui {
@@ -765,6 +822,66 @@ mod tests {
             m.step_layer(true, 7);
         }
         assert_eq!(m.view(), Some(19));
+    }
+
+    #[test]
+    fn the_header_never_overlaps_or_clips_down_to_320_wide() {
+        for w in [320.0f32, 341.0, 384.0, 427.0, 480.0, 640.0, 683.0, 960.0, 1280.0, 2560.0] {
+            let help = help_button_rect(w);
+            let switch = mode_switch_rect(w);
+            let room = title_room(w);
+            let title = [(w - room) / 2.0, 0.0, room, BAR_H];
+            let disjoint = |a: [f32; 4], b: [f32; 4]| {
+                a[0] + a[2] <= b[0] || b[0] + b[2] <= a[0] || a[1] + a[3] <= b[1] || b[1] + b[3] <= a[1]
+            };
+            // Everything on screen, nothing under anything else.
+            for r in [help, switch, title, layer_button_rect(w, false), layer_button_rect(w, true)] {
+                assert!(r[0] >= 0.0 && r[1] >= 0.0 && r[0] + r[2] <= w, "{w}: {r:?}");
+            }
+            assert!(disjoint(help, title), "{w}: the title runs under the ? button");
+            assert!(disjoint(help, switch) && disjoint(title, switch), "{w}");
+            // The bar holds the title and the button; the switch starts under it.
+            assert!(help[1] + help[3] <= BAR_H && switch[1] >= BAR_H);
+            // The keys' card stays on screen, even a wide one on a small screen.
+            for line_w in [80.0, 160.0, 400.0] {
+                let c = help_card_rect(w, 240.0, line_w, 5);
+                assert!(c[0] >= 2.0 && c[0] + c[2] <= w - 2.0 + 0.01, "{w} {line_w}: {c:?}");
+                assert!(c[1] >= BAR_H && c[1] + c[3] <= 240.0, "{w}: {c:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_menu_head_is_short_without_a_title_and_teleport_goes_where_told() {
+        let mut m = MapMenu {
+            at: [10.0, 10.0],
+            pos: [1, 70, 2],
+            waypoint: None,
+            title: Some("Plains".into()),
+            teleport_y: Some(71),
+            items: vec![MenuItem::NewWaypointHere, MenuItem::TeleportTo],
+        };
+        assert_eq!(m.head(), MENU_HEAD);
+        let [x, y, ..] = m.rect(400.0, 300.0);
+        assert_eq!(
+            m.item_at(400.0, 300.0, x + 5.0, y + MENU_HEAD + MENU_ROW + 1.0),
+            Some(MenuItem::TeleportTo)
+        );
+        m.title = None;
+        assert_eq!(m.head(), MENU_HEAD_SHORT);
+        assert_eq!(
+            m.item_at(400.0, 300.0, x + 5.0, y + MENU_HEAD_SHORT + 1.0),
+            Some(MenuItem::NewWaypointHere)
+        );
+        // The middle of the block, for negative coordinates too.
+        assert_eq!(teleport_command(10, Some(65), -3), "/tp @s 10.5 65 -2.5");
+        assert_eq!(teleport_command(-7, None, 4), "/tp @s -6.5 ~ 4.5");
+        // Creative or Spectator, and allowed: an op (2+) or a level the game doesn't tell.
+        assert!(may_teleport(true, true, Some(2)));
+        assert!(may_teleport(true, true, None));
+        assert!(!may_teleport(true, true, Some(0)));
+        assert!(!may_teleport(true, false, Some(4)));
+        assert!(!may_teleport(false, true, Some(4)));
     }
 
     #[test]

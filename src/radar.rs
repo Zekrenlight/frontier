@@ -4,7 +4,7 @@
 //! (`src/native/glue.rs`) reads its own copies of the creatures once a tick, when asked
 //! here, and hands back a short list; the rest of the mod only reads that list.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 /// What a dot stands for, and so its colour.
@@ -75,6 +75,10 @@ pub enum Face {
         plan: std::sync::Arc<crate::headshot::Plan>,
         or: Option<(String, std::sync::Arc<crate::headshot::Plan>)>,
     },
+    /// A marker image another mod or a resource pack gives for entity type `entity` (see
+    /// [`crate::faces::marker_path`]), used before anything Frontier makes itself; where there
+    /// is none, `then` (the face made from the model, or no face: a dot).
+    Marker { entity: String, then: Box<Face> },
 }
 
 impl Face {
@@ -83,11 +87,23 @@ impl Face {
         match self {
             Face::None | Face::Player { .. } => None,
             Face::Model { key, .. } => Some(key.clone()),
+            Face::Marker { entity, .. } => Some(format!("marker|{entity}")),
         }
     }
     /// Whether there is a face to show instead of a dot.
     pub fn some(&self) -> bool {
         !matches!(self, Face::None)
+    }
+    /// A marker image to try first for entity `entity`, else `then`. Players keep their heads.
+    pub fn marker_or(entity: &str, then: Face) -> Face {
+        match then {
+            Face::Player { .. } => then,
+            _ if entity.is_empty() => then,
+            _ => Face::Marker {
+                entity: entity.to_owned(),
+                then: Box::new(then),
+            },
+        }
     }
 }
 
@@ -240,6 +256,22 @@ pub fn set_inputs(tab: bool, debug_shown: bool) {
     TAB.store(tab, Ordering::Relaxed);
     DEBUG_SHOWN.store(debug_shown, Ordering::Relaxed);
 }
+
+/// The game side, once a frame: the local player's permission level as the server told the
+/// client (0 to 4; what vanilla's F3 + F4 and `/tp` go by).
+pub fn set_permission(level: u8) {
+    PERMISSION.store(level.min(4), Ordering::Relaxed);
+}
+
+/// The local player's permission level, None until the game side has said.
+pub fn permission() -> Option<u8> {
+    match PERMISSION.load(Ordering::Relaxed) {
+        u8::MAX => None,
+        l => Some(l),
+    }
+}
+
+static PERMISSION: AtomicU8 = AtomicU8::new(u8::MAX);
 
 /// Whether the player list key is held (the game's own key state, so it works while the
 /// player list shows, and on the world map).

@@ -3,6 +3,12 @@
 //! draws it with ([`crate::headshot`]), so it follows its variant and the resource packs in
 //! use. Players' heads are drawn by the game itself, as chat heads are. Nothing is shipped: a
 //! creature whose face can't be made keeps its dot.
+//!
+//! Before any of that, a marker image wins: `assets/<namespace>/textures/frontier/markers/
+//! <path>.png` for entity type `<namespace>:<path>` (see [`marker_path`]), from a mod's own
+//! assets or a resource pack (a pack's wins over a mod's, as for any texture). It is how a
+//! mod whose creature is drawn by its own renderer, over a vanilla type it copies, gives the
+//! map its real look; a pack can replace a vanilla creature's face the same way.
 
 use crate::png;
 use crate::radar::{Dot, Face};
@@ -19,6 +25,9 @@ pub struct Faces {
     slots: HashMap<String, usize>,
     /// Faces that couldn't be made, not tried again until the packs change.
     failed: HashSet<String>,
+    /// Entity types looked up for a marker image since the packs last changed: whether one
+    /// was found.
+    markers: HashMap<String, bool>,
     /// Textures read, decoded: width, height and RGBA.
     images: HashMap<String, Option<(u32, u32, Vec<u8>)>>,
     pixels: Vec<u8>,
@@ -34,7 +43,18 @@ impl Faces {
         if !self.made {
             return None;
         }
-        let i = *self.slots.get(&face.key()?)?;
+        if let Face::Marker { entity, then } = face {
+            return match self.markers.get(entity) {
+                Some(true) => self.slot_of(&face.key()?),
+                Some(false) => self.slot(then),
+                None => None,
+            };
+        }
+        self.slot_of(&face.key()?)
+    }
+
+    fn slot_of(&self, key: &str) -> Option<[f32; 2]> {
+        let i = *self.slots.get(key)?;
         Some([((i % PER_ROW) * 8) as f32, ((i / PER_ROW) * 8) as f32])
     }
 
@@ -50,6 +70,7 @@ impl Faces {
             self.slots.clear();
             self.failed.clear();
             self.images.clear();
+            self.markers.clear();
             self.dirty = true;
         }
         if self.pixels.is_empty() {
@@ -57,7 +78,22 @@ impl Faces {
         }
         let mut new = 0;
         for d in dots {
-            let Some(key) = d.face.key() else { continue };
+            // A marker image first: looked up once per entity type (and pack change).
+            let face = match &d.face {
+                Face::Marker { entity, then } => {
+                    let has = match self.markers.get(entity) {
+                        Some(&has) => has,
+                        None => {
+                            let has = self.image(host, &marker_path(entity)).is_some();
+                            self.markers.insert(entity.clone(), has);
+                            has
+                        }
+                    };
+                    if has { &d.face } else { &**then }
+                }
+                f => f,
+            };
+            let Some(key) = face.key() else { continue };
             if self.slots.contains_key(&key) || self.failed.contains(&key) {
                 continue;
             }
@@ -66,7 +102,7 @@ impl Faces {
                 break;
             }
             new += 1;
-            match self.make(host, &d.face) {
+            match self.make(host, face) {
                 Some(rgba) => {
                     if self.slots.len() >= PER_ROW * PER_ROW {
                         // Full: start again with the faces on show now.
@@ -123,6 +159,10 @@ impl Faces {
     fn make(&mut self, host: &dyn ClientHost, face: &Face) -> Option<Vec<u8>> {
         match face {
             Face::None | Face::Player { .. } => None,
+            Face::Marker { entity, .. } => {
+                let (w, h, img) = self.image(host, &marker_path(entity))?;
+                Some(shrink_to_8(*w, *h, img))
+            }
             Face::Model { path, plan, or, .. } => {
                 let first = self
                     .image(host, path)
@@ -152,9 +192,107 @@ impl Faces {
     }
 }
 
+/// Where entity type `entity`'s marker image is looked for: `<namespace>:frontier/markers/
+/// <path>` under `textures/`, so `vulture:vulture` is `assets/vulture/textures/frontier/
+/// markers/vulture.png` and `minecraft:cow` is `assets/minecraft/textures/frontier/markers/
+/// cow.png`.
+pub fn marker_path(entity: &str) -> String {
+    let (ns, path) = entity.split_once(':').unwrap_or(("minecraft", entity));
+    format!("{ns}:frontier/markers/{path}")
+}
+
+/// A marker image of any size as the 8 x 8 a face slot holds: each texel the average of the
+/// texels it covers, weighted by how opaque they are (so a transparent edge doesn't darken
+/// it); an 8 x 8 image is kept as it is.
+pub fn shrink_to_8(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
+    let (w, h) = (w.max(1) as usize, h.max(1) as usize);
+    let mut out = vec![0u8; 8 * 8 * 4];
+    for oy in 0..8 {
+        for ox in 0..8 {
+            let (x0, x1) = (ox * w / 8, ((ox + 1) * w / 8).max(ox * w / 8 + 1).min(w));
+            let (y0, y1) = (oy * h / 8, ((oy + 1) * h / 8).max(oy * h / 8 + 1).min(h));
+            let (mut r, mut g, mut b, mut a, mut n) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let i = (y * w + x) * 4;
+                    let Some(p) = rgba.get(i..i + 4) else { continue };
+                    let pa = u64::from(p[3]);
+                    r += u64::from(p[0]) * pa;
+                    g += u64::from(p[1]) * pa;
+                    b += u64::from(p[2]) * pa;
+                    a += pa;
+                    n += 1;
+                }
+            }
+            let o = (oy * 8 + ox) * 4;
+            if a > 0 {
+                out[o] = (r / a) as u8;
+                out[o + 1] = (g / a) as u8;
+                out[o + 2] = (b / a) as u8;
+                out[o + 3] = (a / n) as u8;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marker_images_are_found_by_entity_type_and_shrunk_to_a_face() {
+        assert_eq!(marker_path("vulture:vulture"), "vulture:frontier/markers/vulture");
+        assert_eq!(marker_path("cow"), "minecraft:frontier/markers/cow");
+        assert_eq!(
+            marker_path("mymod:beasts/wolf_king"),
+            "mymod:frontier/markers/beasts/wolf_king"
+        );
+        // A 16 x 16: each 2 x 2 becomes one texel; a half transparent block keeps its colour.
+        let mut img = vec![0u8; 16 * 16 * 4];
+        for y in 0..16 {
+            for x in 0..16 {
+                let i = (y * 16 + x) * 4;
+                img[i..i + 4].copy_from_slice(&[200, 100, 50, if x % 2 == 0 { 255 } else { 0 }]);
+            }
+        }
+        let s = shrink_to_8(16, 16, &img);
+        assert_eq!(s.len(), 8 * 8 * 4);
+        assert_eq!(&s[0..4], &[200, 100, 50, 127]);
+        // An 8 x 8 is kept texel for texel.
+        let small: Vec<u8> = (0..8 * 8 * 4).map(|i| if i % 4 == 3 { 255 } else { (i % 251) as u8 }).collect();
+        assert_eq!(shrink_to_8(8, 8, &small), small);
+    }
+
+    #[test]
+    fn a_marker_falls_back_to_what_it_wraps() {
+        let mut f = Faces::default();
+        f.made = true;
+        f.slots.insert("cow".into(), 3);
+        let model = Face::Model {
+            key: "cow".into(),
+            path: "entity/cow/cow_temperate".into(),
+            plan: std::sync::Arc::new(crate::headshot::Plan { pixels: Vec::new() }),
+            or: None,
+        };
+        let m = Face::marker_or("minecraft:cow", model);
+        assert_eq!(m.key().as_deref(), Some("marker|minecraft:cow"));
+        // Not looked up yet: nothing; no marker: the model's face; a marker: its own slot.
+        assert_eq!(f.slot(&m), None);
+        f.markers.insert("minecraft:cow".into(), false);
+        assert_eq!(f.slot(&m), Some([24.0, 0.0]));
+        f.markers.insert("minecraft:cow".into(), true);
+        f.slots.insert("marker|minecraft:cow".into(), 17);
+        assert_eq!(f.slot(&m), Some([8.0, 8.0]));
+        // A mod's creature drawn by its own renderer, with no marker: a dot, never the face of
+        // the vanilla type it copies.
+        let modded = Face::marker_or("vulture:vulture", Face::None);
+        f.markers.insert("vulture:vulture".into(), false);
+        assert_eq!(f.slot(&modded), None);
+        // Players keep their heads.
+        let p = Face::marker_or("minecraft:player", Face::Player { name: "Alex".into() });
+        assert!(matches!(p, Face::Player { .. }));
+    }
 
     #[test]
     fn faces_have_keys_and_players_and_none_have_none() {

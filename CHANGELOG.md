@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.0.1 (2026-11-20)
+
+- The minimap starts at 64 GUI pixels wide (it was 112), still one block a map pixel, so it
+  shows about 64 blocks across. A size already saved in your settings stays as it is.
+- World map: the top bar names the dimension, and a **?** at its right end lists the keys while
+  the pointer is on it. The always-on hint line is gone, so nothing overlaps the Surface | Cave
+  switch or runs off the top on narrow screens (checked down to 320 GUI pixels wide); a long
+  title or cave layer name is cut to fit.
+- The right-click menu's top line is the biome there (in your language) instead of
+  "This spot". Frontier remembers each explored chunk's biome (`b.<x>.<z>.txt` beside the
+  surface map), so far-off spots are named too; a spot never explored shows its coordinates
+  alone, and a cave layer shows the biome only where the game holds the chunk.
+- **Teleport here** (new setting, on at first) now shows only in Creative or Spectator and only
+  when the server gives you `/tp` (permission level 2); it goes onto the ground there (the floor
+  of the cave layer shown in a cave view), to a waypoint's own height, or at your own height
+  (`~`) where the ground isn't known, to the middle of the block.
+- Dropped items' icons (while `Tab` is held) are drawn on no backing; the name keeps its faint
+  label.
+- Creatures from other mods: a creature another mod draws with its own renderer (on top of a
+  vanilla type it copies, such as a wandering trader) no longer shows the copied type's face.
+  It shows the marker image its mod or a resource pack gives at
+  `assets/<namespace>/textures/frontier/markers/<path>.png`, else a dot. Packs can give
+  markers for vanilla creatures the same way.
+
 ## 1.0.0 (2026-11-19)
 
 First release of Frontier, an original Sunrise native mod by Zekrenlight (MIT).

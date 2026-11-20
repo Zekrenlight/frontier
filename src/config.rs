@@ -61,6 +61,8 @@ pub const KEY_SHARP: &str = "sharp_maps";
 pub const KEY_HIDE_F3: &str = "hide_with_f3";
 pub const KEY_MAP_COMPASS: &str = "map_compass";
 pub const KEY_MAP_MENU: &str = "map_menu";
+// Teleport here in the world map's menu, for Creative and Spectator (on at first).
+pub const KEY_MAP_TELEPORT: &str = "map_teleport";
 
 /// How creatures show on the maps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,6 +253,8 @@ pub struct Config {
     pub map_compass: bool,
     /// Right-click on the world map opens a menu (off: right-click adds a waypoint there).
     pub map_menu: bool,
+    /// *Teleport here* in the world map's menu, in Creative or Spectator with `/tp` allowed.
+    pub map_teleport: bool,
 }
 
 impl Default for Config {
@@ -259,7 +263,7 @@ impl Default for Config {
             minimap: true,
             shape: Shape::Round,
             corner: Corner::TopRight,
-            size: 112.0,
+            size: 64.0,
             zoom: 3,
             rotate: false,
             frame: FrameStyle::Plain,
@@ -293,6 +297,7 @@ impl Default for Config {
             hide_with_f3: true,
             map_compass: true,
             map_menu: true,
+            map_teleport: true,
         }
     }
 }
@@ -348,6 +353,9 @@ mod tests {
         assert!(!d.containers && !d.decor, "block markers are off at first");
         assert!(d.mobs && d.mobs_hostile && d.mobs_passive && d.mobs_players && d.mobs_villagers);
         assert!(d.caves);
+        assert!(d.map_teleport, "Teleport here is offered at first (in Creative)");
+        assert_eq!(d.size, 64.0, "the minimap starts at its smallest size");
+        assert_eq!(d.zoom, 3, "one block a map pixel");
         assert_ne!(KEY_ITEMS, KEY_OBJECTS);
     }
 }

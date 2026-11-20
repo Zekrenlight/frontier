@@ -5,6 +5,7 @@
 //! cave at Y -40 and a dome's inside at Y 70 each keep their own map and never write over one
 //! another or the surface) and `waypoints/<world>/<dimension>.txt`.
 
+use crate::biomes::BiomeMap;
 use crate::store::{path_part, Column, Disk, MapStore};
 use crate::waypoints::{self, Waypoint};
 use mod_api::{ClientHost, ConfigFileError, ConfigFiles, ConfigPath};
@@ -55,6 +56,8 @@ pub struct World {
     pub map: MapStore,
     /// The cave layers, by band (see [`layer_of`]): the floor read under each band's ceiling.
     pub caves: BTreeMap<i32, MapStore>,
+    /// The surface's biome, chunk by chunk (`b.<x>.<z>.txt` beside the surface map).
+    pub biomes: BiomeMap,
     pub waypoints: Vec<Waypoint>,
     pub waypoints_dirty: bool,
 }
@@ -63,6 +66,7 @@ impl World {
     pub fn open(disk: &dyn Disk, key: String, dimension: String) -> Self {
         let map = MapStore::new(map_folder(&key, &dimension));
         let caves = BTreeMap::new();
+        let biomes = BiomeMap::new(map_folder(&key, &dimension));
         let waypoints = disk
             .read(&waypoint_file(&key, &dimension))
             .map(|b| waypoints::decode(&String::from_utf8_lossy(&b)))
@@ -72,6 +76,7 @@ impl World {
             dimension,
             map,
             caves,
+            biomes,
             waypoints,
             waypoints_dirty: false,
         }
@@ -108,6 +113,7 @@ impl World {
         for c in self.caves.values_mut() {
             c.save(disk);
         }
+        self.biomes.save(disk);
         self.save_waypoints(disk);
     }
 
@@ -115,6 +121,7 @@ impl World {
     /// left in memory is let go too (its files stay, and are read again when shown).
     pub fn maintain(&mut self, disk: &dyn Disk, keep: Option<i32>) {
         self.map.maintain(disk);
+        self.biomes.maintain(disk);
         for c in self.caves.values_mut() {
             c.maintain(disk);
         }

@@ -22,7 +22,7 @@ const TABS: &[(&str, &[&str])] = &[
     ("Minimap", &["minimap", "minimap_shape", "corner", "size", "zoom", "rotate", "minimap_frame", "compass", "coordinates", "biome", "day_night", "slopes", "cave_mode", "hide_with_f3", "accent"]),
     ("Waypoints", &["minimap_waypoints", "beacons", "labels", "label_range", "death_waypoint"]),
     ("Radar", &["mobs", "mobs_hostile", "mobs_passive", "mobs_players", "mobs_range", "mobs_height_fade", "mobs_world_map", "mobs_villagers", "dot_style", "dot_names", "player_names"]),
-    ("World map", &["items", "objects", "storage", "decor", "sharp_maps", "map_compass", "map_menu"]),
+    ("World map", &["items", "objects", "storage", "decor", "sharp_maps", "map_compass", "map_menu", "map_teleport"]),
 ];
 /// A line under the rows (where the rest of the mod's controls live), if any.
 const NOTE: &str = "";

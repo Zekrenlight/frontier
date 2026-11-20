@@ -1,4 +1,4 @@
-//! Frontier 1.0.0 for Sunrise, by Zekrenlight (MIT).
+//! Frontier 1.0.1 for Sunrise, by Zekrenlight (MIT).
 //!
 //! - Minimap: square or round, in any corner, any size, zoomed with keys, north up or turned
 //!   with the player, with compass letters, coordinates and biome under it, the time of day's
@@ -16,6 +16,7 @@
 //! heights around each column. Everything here is the mod's own; the only game-side part is
 //! `src/native/glue.rs`, which opens the settings page from the settings key.
 
+pub mod biomes;
 pub mod cave;
 pub mod colors;
 pub mod config;
@@ -52,7 +53,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use store::REGION_SHIFT;
-use ui::{Action, Back, Editor, MenuItem, Page, Request, Ui, MENU_HEAD, MENU_ROW};
+use ui::{Action, Back, Editor, MenuItem, Page, Request, Ui, MENU_ROW};
 use view::View;
 use waypoints::{Kind, Waypoint};
 use world::World;
@@ -125,7 +126,13 @@ struct State {
     chat: Option<(String, u8)>,
     /// The cave layer shown on the world map is still being read (redraw it often).
     layer_busy: bool,
+    /// Where the next chunk biomes to remember are read, in [`biomes::ring_order`].
+    biome_cursor: usize,
 }
+
+/// How many chunks round the player have their biome remembered, and how many a tick.
+const BIOME_RADIUS: i32 = 8;
+const BIOMES_PER_TICK: usize = 6;
 
 /// Item icons, by item id: resolved once (per world) and kept.
 static ITEM_KEYS: Mutex<Option<std::collections::HashMap<String, Option<ItemKey>>>> =
@@ -226,6 +233,7 @@ fn sync(host: &dyn ClientHost) {
         hide_with_f3: b(KEY_HIDE_F3, d.hide_with_f3),
         map_compass: b(KEY_MAP_COMPASS, d.map_compass),
         map_menu: b(KEY_MAP_MENU, d.map_menu),
+        map_teleport: b(KEY_MAP_TELEPORT, d.map_teleport),
     });
 }
 
@@ -544,15 +552,22 @@ impl State {
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(i, _)| i)
         });
-        let can_teleport = host
+        let creative = host
             .local_player()
-            .and_then(|p| p.permission_level(host))
-            .is_some_and(|l| l >= 2);
-        let (pos, mut items) = match waypoint {
+            .and_then(|p| p.game_mode(host))
+            .is_some_and(|m| matches!(m, mod_api::GameMode::Creative | mod_api::GameMode::Spectator));
+        let permission = radar::permission().or_else(|| {
+            host.local_player()
+                .and_then(|p| p.permission_level(host))
+        });
+        let can_teleport = ui::may_teleport(config().map_teleport, creative, permission);
+        let view = m.view();
+        let (pos, teleport_y, mut items) = match waypoint {
             Some(i) => {
                 let pos = self.world.as_ref().map_or([0; 3], |wd| wd.waypoints[i].pos);
                 (
                     pos,
+                    Some(pos[1]),
                     vec![MenuItem::EditWaypoint(i), MenuItem::RemoveWaypoint(i)],
                 )
             }
@@ -561,6 +576,7 @@ impl State {
                 let (bx, bz) = (wx.floor() as i32, wz.floor() as i32);
                 (
                     [bx, self.ground_at(bx, bz), bz],
+                    self.known_ground(bx, bz),
                     vec![MenuItem::NewWaypointHere],
                 )
             }
@@ -573,23 +589,63 @@ impl State {
             MenuItem::ShareInChat,
             MenuItem::OpenSettings,
         ]);
+        let title = match waypoint {
+            Some(i) => self
+                .world
+                .as_ref()
+                .and_then(|wd| wd.waypoints.get(i))
+                .map(|wp| wp.name.clone()),
+            None => self.biome_at(host, pos, view).map(|b| biome_name(host, &b)),
+        };
         self.ui.menu = Some(ui::MapMenu {
             at,
             pos,
             waypoint,
+            title,
+            teleport_y,
             items,
         });
+    }
+
+    /// The ground's height at `(x, z)` plus one in the view shown (the cave layer's floor in a
+    /// cave view), where it has been read.
+    fn known_ground(&self, x: i32, z: i32) -> Option<i32> {
+        self.world
+            .as_ref()
+            .map(|wd| wd.column(self.ui.map.view(), x, z))
+            .filter(|c| c.known())
+            .map(|c| i32::from(c.height) + 1)
+    }
+
+    /// The biome at `pos`: the game's own where it holds the chunk; else, on the surface, the
+    /// one remembered when the chunk was explored. A cave view has only the game's (a cave's
+    /// biome isn't the one over it).
+    fn biome_at(&mut self, host: &dyn ClientHost, pos: [i32; 3], view: Option<i32>) -> Option<String> {
+        let live = host
+            .level(host.dimension())
+            .and_then(|level| level.client_biome(host, pos));
+        if live.is_some() || view.is_some() {
+            return live;
+        }
+        let disk = world::disk(host);
+        self.world.as_mut()?.biomes.at(&disk, pos[0], pos[2])
     }
 
     /// Does a choice of the right-click menu (inside the click, so copying may use the
     /// clipboard).
     fn menu_choice(&mut self, host: &dyn ClientHost, item: MenuItem, pos: [i32; 3]) {
-        self.ui.menu = None;
+        let teleport_y = self.ui.menu.take().and_then(|m| m.teleport_y);
         let coords = format!("{} {} {}", pos[0], pos[1], pos[2]);
         match item {
             MenuItem::EditWaypoint(i) => self.edit_waypoint(i, Back::Map),
             MenuItem::RemoveWaypoint(i) => self.ui.show(Page::Confirm(i, Back::Map)),
-            MenuItem::TeleportTo => self.ui.requests.push(Request::Teleport(pos)),
+            MenuItem::TeleportTo => {
+                self.ui.requests.push(Request::Teleport {
+                    x: pos[0],
+                    y: teleport_y,
+                    z: pos[2],
+                });
+            }
             MenuItem::NewWaypointHere => {
                 let e = self.new_waypoint_editor(pos, Back::Map, host);
                 self.ui.show(Page::Edit(e));
@@ -818,21 +874,17 @@ fn item_marker(draw: &mut dyn DrawContext, x: f32, y: f32, alpha: f32) {
 }
 
 /// A dropped item's icon, `size` GUI pixels square centred on `(x, y)`, drawn by the game
-/// as it draws one in a slot (the resource packs' model and texture), on a small dark card so
-/// it reads over any ground; false (nothing drawn) for an item the game doesn't know.
+/// as it draws one in a slot (the resource packs' model and texture), on nothing: just the
+/// item, as in the inventory. False (nothing drawn) for an item the game doesn't know.
 fn item_icon(
     draw: &mut dyn DrawContext,
     key: ItemKey,
     x: f32,
     y: f32,
     size: f32,
-    alpha: f32,
+    _alpha: f32,
 ) -> bool {
     let (x0, y0) = ((x - size / 2.0).round(), (y - size / 2.0).round());
-    draw.fill(
-        [x0 - 1.0, y0 - 1.0, size + 2.0, size + 2.0],
-        radar::fade(0xB0_0F1118, alpha),
-    );
     draw.item(key, [x0, y0], size)
 }
 
@@ -898,7 +950,7 @@ fn draw_dot(
                         face_rim(draw, x, y, d.kind, alpha);
                         player_head(draw, name, x, y, alpha)
                     }
-                    radar::Face::Model { .. } => match faces.slot(&d.face) {
+                    radar::Face::Model { .. } | radar::Face::Marker { .. } => match faces.slot(&d.face) {
                         Some([u, v]) => {
                             // The face on a rim of its kind's colour, so a cow's face still
                             // says "passive" at a glance.
@@ -1380,13 +1432,11 @@ impl Frontier {
                 line = format!("X {bx}   Y {}   Z {bz}", c.height);
             }
         }
-        let title = format!(
-            "{} \u{2022} {}",
-            tr(host, "frontier.menu.world_map"),
-            short_dim(&st.world)
-        );
+        // The top bar: the dimension, centred and cut to fit, and a `?` at its right end whose
+        // card lists the map's keys (no instructions over the map itself).
+        draw.fill([0.0, 0.0, w, ui::BAR_H], 0x90_000000);
+        let title = ui::fit(draw, &dim_title(host, &st.world), ui::title_room(w));
         let tw = draw.text_width(&title);
-        draw.fill([0.0, 0.0, w, 14.0], 0x90_000000);
         draw.text(&title, [((w - tw) / 2.0).round(), 3.0], 0xFF_FFFFFF, true);
         let lw = draw.text_width(&line);
         draw.fill(
@@ -1399,22 +1449,15 @@ impl Frontier {
             0xFF_E8E0C8,
             false,
         );
-        let hint = tr(
-            host,
-            if cfg.map_menu {
-                "frontier.map.hint_menu"
-            } else {
-                "frontier.map.hint"
-            },
-        );
-        let hw = draw.text_width(&hint);
-        draw.text(&hint, [(w - hw - 4.0).round(), 17.0], 0xFF_A09880, false);
+        let help = ui::help_button_rect(w);
+        let on_help = ui::inside(help, mouse[0], mouse[1]) && st.ui.menu.is_none();
         if cfg.map_compass {
             compass(draw, (w - 26.0).round(), (h - 50.0).round());
         }
         draw_layer_controls(draw, host, m.view(), st.layer_busy, w, mouse);
+        draw_help(draw, host, &cfg, help, on_help, w, h);
         if let Some(menu) = &st.ui.menu {
-            draw_menu(draw, host, menu, st, w, h, mouse);
+            draw_menu(draw, host, menu, w, h, mouse);
         }
     }
 }
@@ -1547,6 +1590,7 @@ fn draw_layer_controls(
         name
     };
     let [bx, by, bw, bh] = ui::layer_button_rect(w, true);
+    let name = ui::fit(draw, &name, (w - (bx + bw + 3.0) - 12.0).max(0.0));
     let tw = draw.text_width(&name);
     let lr = [bx + bw + 3.0, by, tw + 8.0, bh];
     card(draw, lr);
@@ -1554,13 +1598,13 @@ fn draw_layer_controls(
     draw.text(&name, [lr[0] + 5.0, by + 3.0], 0xFF_E8DCC8, false);
 }
 
-/// The right-click menu: a dark card with a thin accent line, the spot's coordinates (and the
-/// waypoint's name) on top, then the choices; the one under the pointer lights up.
+/// The right-click menu: a dark card with a thin accent line, the waypoint's name or the
+/// biome there and the spot's coordinates on top, then the choices; the one under the pointer
+/// lights up.
 fn draw_menu(
     draw: &mut dyn DrawContext,
     host: &dyn ClientHost,
     menu: &ui::MapMenu,
-    st: &State,
     w: f32,
     h: f32,
     mouse: [f32; 2],
@@ -1574,21 +1618,22 @@ fn draw_menu(
     draw.fill([x, y + mh - 1.0, mw, 1.0], 0xFF_1E2330);
     draw.fill([x, y, 1.0, mh], 0xFF_1E2330);
     draw.fill([x + mw - 1.0, y, 1.0, mh], 0xFF_1E2330);
-    let head = match menu
-        .waypoint
-        .and_then(|i| st.world.as_ref()?.waypoints.get(i))
-    {
-        Some(wp) => ui::fit(draw, &wp.name, mw - 8.0),
-        None => tr(host, "frontier.map_menu.here"),
-    };
-    draw.text(&head, [x + 5.0, y + 4.0], 0xFF_E8DCC8, true);
+    // The waypoint's name or the biome there, then the coordinates (alone where the biome
+    // isn't known).
+    let mut line_y = y + 4.0;
+    if let Some(title) = &menu.title {
+        let title = ui::fit(draw, title, mw - 10.0);
+        draw.text(&title, [x + 5.0, line_y], 0xFF_E8DCC8, true);
+        line_y += 10.0;
+    }
     let p = menu.pos;
     let coords = format!("{}  {}  {}", p[0], p[1], p[2]);
-    draw.text(&coords, [x + 5.0, y + 14.0], 0xFF_8B93A7, false);
-    draw.fill([x + 4.0, y + MENU_HEAD - 2.0, mw - 8.0, 1.0], 0xFF_1E2330);
+    draw.text(&coords, [x + 5.0, line_y], 0xFF_8B93A7, false);
+    let head = menu.head();
+    draw.fill([x + 4.0, y + head - 2.0, mw - 8.0, 1.0], 0xFF_1E2330);
     let hovered = menu.item_at(w, h, mouse[0], mouse[1]);
     for (i, item) in menu.items.iter().enumerate() {
-        let ry = y + MENU_HEAD + i as f32 * MENU_ROW;
+        let ry = y + head + i as f32 * MENU_ROW;
         let lit = hovered == Some(*item);
         if lit {
             draw.fill([x + 2.0, ry, mw - 4.0, MENU_ROW], 0xFF_1E2330);
@@ -1601,6 +1646,82 @@ fn draw_menu(
             (false, false) => 0xFF_E8DCC8,
         };
         draw.text(&tr(host, item.label_key()), [x + 8.0, ry + 3.0], c, false);
+    }
+}
+
+/// The world map's title: the dimension shown, by its name in the game's language where it
+/// has one (`Overworld`, `The Nether`), else its id's last part in words (`my_mod:sky_lands`
+/// is `Sky Lands`).
+fn dim_title(host: &dyn ClientHost, world: &Option<World>) -> String {
+    let d = world.as_ref().map_or("", |w| w.dimension.as_str());
+    let (ns, path) = d.split_once(':').unwrap_or(("minecraft", d));
+    let words = || {
+        path.split(['_', '/'])
+            .filter(|w| !w.is_empty())
+            .map(|w| {
+                let mut c = w.chars();
+                c.next().map_or(String::new(), |f| f.to_uppercase().collect::<String>() + c.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    host.translate(&format!("frontier.dimension.{ns}.{path}"))
+        .unwrap_or_else(words)
+}
+
+/// The keys the world map answers to, one per line, as the `?` card lists them.
+fn help_lines(host: &dyn ClientHost, cfg: &Config) -> Vec<String> {
+    let mut keys = vec![
+        "frontier.map.help.drag",
+        "frontier.map.help.scroll",
+        "frontier.map.help.caves",
+        "frontier.map.help.layers",
+    ];
+    keys.push(if cfg.map_menu {
+        "frontier.map.help.menu"
+    } else {
+        "frontier.map.help.waypoint"
+    });
+    keys.into_iter().map(|k| tr(host, k)).collect()
+}
+
+/// The `?` button in the top bar and, while the pointer is on it, the card of keys under it.
+fn draw_help(
+    draw: &mut dyn DrawContext,
+    host: &dyn ClientHost,
+    cfg: &Config,
+    button: [f32; 4],
+    open: bool,
+    w: f32,
+    h: f32,
+) {
+    let accent = 0xFF00_0000 | (host.setting_color("accent").unwrap_or(0xF9801D) & 0xFF_FFFF);
+    let [bx, by, bw, bh] = button;
+    draw.fill([bx, by, bw, bh], if open { accent } else { 0xFF_1E2330 });
+    let q = "?";
+    let qw = draw.text_width(q);
+    let qc = if open { 0xFF_0F1118 } else { 0xFF_E8DCC8 };
+    draw.text(q, [(bx + (bw - qw) / 2.0).round(), by + 2.0], qc, false);
+    if !open {
+        return;
+    }
+    let lines = help_lines(host, cfg);
+    let line_w = lines.iter().map(|l| draw.text_width(l)).fold(0.0f32, f32::max);
+    let [x, y, cw, ch] = ui::help_card_rect(w, h, line_w, lines.len());
+    // The shared Sunrise dark card with an accent top edge.
+    draw.fill([x + 1.0, y + 1.0, cw, ch], 0x60_000000);
+    draw.fill([x, y, cw, ch], 0xF4_0F1118);
+    draw.fill([x, y, cw, 2.0], accent);
+    draw.fill([x, y + ch - 1.0, cw, 1.0], 0xFF_1E2330);
+    draw.fill([x, y, 1.0, ch], 0xFF_1E2330);
+    draw.fill([x + cw - 1.0, y, 1.0, ch], 0xFF_1E2330);
+    for (i, l) in lines.iter().enumerate() {
+        let ly = y + 5.0 + i as f32 * 10.0;
+        if ly + 9.0 > y + ch {
+            break;
+        }
+        let l = ui::fit(draw, l, cw - 12.0);
+        draw.text(&l, [x + 6.0, ly], 0xFF_E8DCC8, false);
     }
 }
 
@@ -1671,6 +1792,7 @@ impl Hooks for Frontier {
         toggle(r, KEY_HIDE_F3, d.hide_with_f3);
         toggle(r, KEY_MAP_COMPASS, d.map_compass);
         toggle(r, KEY_MAP_MENU, d.map_menu);
+        toggle(r, KEY_MAP_TELEPORT, d.map_teleport);
         // The accent colour of frontier's cards (Sunrise orange by default).
         let _ = r.register_setting(
             mod_api::SettingSpec::color("accent", "frontier.setting.accent", 0xF9801D)
@@ -1705,9 +1827,9 @@ impl Hooks for Frontier {
                     host.mod_screen_close(ID);
                     st.chat = Some((text, 10));
                 }
-                Request::Teleport(p) => {
+                Request::Teleport { x, y, z } => {
                     host.mod_screen_close(ID);
-                    let line = format!("/tp @s {} {} {}", p[0], p[1], p[2]);
+                    let line = ui::teleport_command(x, y, z);
                     if let Err(why) = host.send_chat(&line) {
                         let msg = tr(host, "frontier.notice.teleport_failed").replace("%s", &why);
                         st.notice(msg);
@@ -1924,6 +2046,34 @@ impl Hooks for Frontier {
         }
         // What was read is kept on leaving (it fades out, and is there at once on coming back).
         st.cave = cave;
+        // The biomes of the chunks round the player, remembered for the world map's menu.
+        {
+            static RING: std::sync::OnceLock<Vec<(i32, i32)>> = std::sync::OnceLock::new();
+            let ring = RING.get_or_init(|| biomes::ring_order(BIOME_RADIUS));
+            let (pcx, pcz) = (pos[0] >> 4, pos[2] >> 4);
+            let mut cursor = st.biome_cursor;
+            if let Some(w) = st.world.as_mut() {
+                let mut tried = 0;
+                let mut read = 0;
+                while read < BIOMES_PER_TICK && tried < ring.len() {
+                    let (dx, dz) = ring[cursor % ring.len()];
+                    cursor = (cursor + 1) % ring.len();
+                    tried += 1;
+                    let (cx, cz) = (pcx + dx, pcz + dz);
+                    if w.biomes.known(&disk, cx, cz) {
+                        continue;
+                    }
+                    read += 1;
+                    let (x, z) = (cx * 16 + 8, cz * 16 + 8);
+                    let col = w.map.column(x, z);
+                    let y = if col.known() { i32::from(col.height) } else { pos[1] };
+                    if let Some(b) = level.client_biome(host, [x, y, z]) {
+                        w.biomes.set(&disk, cx, cz, &b);
+                    }
+                }
+            }
+            st.biome_cursor = cursor;
+        }
         if st.tick % 10 == 0 {
             st.biome = level
                 .client_biome(host, pos)
@@ -2319,6 +2469,10 @@ impl Hooks for Frontier {
                 }
                 // A right-click elsewhere opens it again there (below).
             }
+        }
+        // The `?` button only shows its card under the pointer: a click on it does nothing else.
+        if matches!(st.ui.page, Page::Map) && ui::inside(ui::help_button_rect(st.ui.size[0]), at[0], at[1]) {
+            return Flow::Cancel;
         }
         // The Surface | Cave switch and the layer buttons.
         if matches!(st.ui.page, Page::Map) && button == 0 {
