@@ -3,6 +3,10 @@
 A minimap, a world map of everywhere you have been, and waypoints, for the Sunrise client
 (game 26.3, mod API 0.2). Client side only; no sounds.
 
+<img width="353" height="401" alt="image" src="https://github.com/user-attachments/assets/d1f7bad8-9c8e-4182-8097-9ba1661b261d" />
+<img width="2554" height="1361" alt="image" src="https://github.com/user-attachments/assets/fe8a9b12-3008-4797-9521-f620bcee8e82" />
+
+
 ## Minimap
 
 - Round (the default) or square, in any corner, 64–192 GUI pixels wide, five zoom levels (keys `=` / `-`).
