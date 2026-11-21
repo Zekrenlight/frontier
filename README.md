@@ -4,6 +4,7 @@ A minimap, a world map of everywhere you have been, and waypoints, for the Sunri
 (game 26.3, mod API 0.2). Client side only; no sounds.
 
 <img width="353" height="401" alt="image" src="https://github.com/user-attachments/assets/d1f7bad8-9c8e-4182-8097-9ba1661b261d" />
+<img width="263" height="190" alt="image" src="https://github.com/user-attachments/assets/c14f3e6d-dfcd-4f5f-94ea-eeb039ad77a3" />
 <img width="2560" height="1360" alt="image" src="https://github.com/user-attachments/assets/271398d9-7bdf-441a-b13a-14cba07fce3a" />
 
 
