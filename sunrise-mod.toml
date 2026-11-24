@@ -1,6 +1,6 @@
 id = "frontier"
 name = "Frontier"
-version = "1.0.1"
+version = "1.0.2"
 description = "A minimap, a world map of everywhere you have been, waypoints, and nearby creatures (with their faces), dropped items (their icon and real name while Tab is held), things and storage on both maps. Square or round, north up or turning with you, with a cave view (under glass domes too) and layered cave views on the world map, each 16 blocks tall, day and night light and a paper or plain frame. Maps and waypoints are kept per server or world and per dimension."
 authors = ["Zekrenlight"]
 license = "MIT"
