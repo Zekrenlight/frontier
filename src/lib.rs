@@ -29,6 +29,7 @@ pub mod scan;
 pub mod shade;
 pub mod store;
 pub mod ui;
+pub mod widgets;
 pub mod view;
 pub mod waypoints;
 pub mod world;
@@ -37,7 +38,7 @@ pub use config::*;
 
 use colors::BlockColors;
 use faces::{Faces, FACES_TEX};
-use mod_api::client::widgets::Outcome;
+use crate::widgets::Outcome;
 use mod_api::{
     ClientBlockChangedEvent, ClientChunkLoadEvent, ClientHost, ClientLevelUnloadEvent,
     ClientPlayerLoggingOutEvent, ClientStoppingEvent, ClientTickPostEvent, CommandEvent,
@@ -1733,8 +1734,9 @@ fn short_dim(world: &Option<World>) -> String {
 
 /// Which of the mod's keys this is, by its current binding.
 fn bound(host: &dyn ClientHost, name: &str, key: &str) -> bool {
-    host.mod_key(ID, name)
-        .is_some_and(|(k, _)| k == key && k != "key.keyboard.unknown")
+    host.mod_key_mapping(ID, name)
+        .and_then(|m| m.binding(host).map(|(k, _)| k.to_owned()))
+        .is_ok_and(|k| k == key && k != "key.keyboard.unknown")
 }
 
 #[mod_api::sunrise_mod]
@@ -1894,7 +1896,9 @@ impl Hooks for Frontier {
         let Some(pos) = st.block_pos() else { return };
         let mut cfg = config();
         // The keys.
-        let click = |host: &mut dyn ClientHost, k: &str| host.consume_click(ID, k);
+        let click = |host: &mut dyn ClientHost, k: &str| {
+            host.mod_key_mapping(ID, k).and_then(|m| m.consume_click(host)).unwrap_or(false)
+        };
         if click(host, "world_map") {
             st.open = Some(Page::Map);
             st.open_world_map();

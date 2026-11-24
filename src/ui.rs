@@ -3,7 +3,7 @@
 //! that restyles the game's buttons restyles these too.
 
 use crate::waypoints::{self, Kind, Waypoint, COLORS, COLOR_NAMES};
-use mod_api::client::widgets::{Button, Outcome, TextField, WidgetId, Widgets};
+use crate::widgets::{Button, Outcome, TextField, WidgetId, Widgets};
 use mod_api::{ClientHost, DrawContext, Text};
 
 /// The world map's zoom steps, in blocks per GUI pixel.
@@ -417,7 +417,7 @@ impl Ui {
     fn button(&mut self, rect: [f32; 4], label: String, action: Action) {
         let id = self
             .widgets
-            .add_button(Button::new(rect, Text::literal(label)));
+            .add_button(Button::new(rect, label));
         self.actions.push((id, action));
     }
 

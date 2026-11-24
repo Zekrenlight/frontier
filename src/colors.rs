@@ -90,15 +90,16 @@ impl BlockColors {
             return *l;
         }
         let mut l = self.work_out(host, state);
-        let id = state.block().id(host);
-        l.cover = cover_of(&id, l.role);
+        if let Some(id) = state.block().id(host) {
+            l.cover = cover_of(id, l.role);
+        }
         self.looks.insert(state, l);
         l
     }
 
     fn work_out(&mut self, host: &dyn ClientHost, state: BlockState) -> Look {
-        let id = state.block().id(host);
-        let path = id.split_once(':').map_or(id.as_str(), |(_, p)| p);
+        let id = state.block().id(host).unwrap_or("");
+        let path = id.split_once(':').map_or(id, |(_, p)| p);
         let water = matches!(
             path,
             "water" | "bubble_column" | "kelp" | "kelp_plant" | "seagrass" | "tall_seagrass"
@@ -141,7 +142,7 @@ impl BlockColors {
         let (texture, tint) = match top {
             Some(face) => (face.texture.clone(), face.tint_index),
             None => {
-                let (ns, p) = id.split_once(':').unwrap_or(("minecraft", id.as_str()));
+                let (ns, p) = id.split_once(':').unwrap_or(("minecraft", id));
                 (format!("{ns}:block/{p}"), 0)
             }
         };

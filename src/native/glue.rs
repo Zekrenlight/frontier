@@ -136,7 +136,7 @@ fn nearby(game: &Game<'_>) {
         for i in game.dropped.iter() {
             let pos = [i.position.x, i.position.y, i.position.z];
             if near(pos[0], pos[2]) && dots.len() < 896 {
-                let name = sunrise_client::stations::hover_name(&game.pack.names, &i.stack);
+                let name = game.stack_hover_name(&i.stack);
                 dots.push(Dot::dropped(pos, &i.stack.item, name, i.stack.count));
             }
         }

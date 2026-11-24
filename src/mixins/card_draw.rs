@@ -3,8 +3,9 @@
 fn frontier_card_options_draw(
     game: &mut crate::game::Game<'_>,
     batch: &mut sunrise_client::hud::HudBatch,
+    allowed: bool,
 ) -> ::core::ops::ControlFlow<()> {
-    if !crate::game::frontier_card::active(game) {
+    if !allowed || !crate::game::frontier_card::active(game) {
         return ::core::ops::ControlFlow::Continue(());
     }
     crate::game::frontier_card::draw(game, batch);
