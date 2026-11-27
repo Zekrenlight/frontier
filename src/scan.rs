@@ -41,6 +41,23 @@ pub enum Surface {
     UnderRoof(i32),
 }
 
+/// Heights on `WorldSurface` for `columns`, `None` where the chunk isn't loaded.
+fn surface_heights(
+    host: &dyn ClientHost,
+    level: LevelRef,
+    columns: &[(i32, i32)],
+) -> Option<Vec<Option<i32>>> {
+    use std::ops::ControlFlow;
+    let mut found = std::collections::HashMap::new();
+    level
+        .visit_surface_heights(host, columns, Heightmap::WorldSurface, &mut |col, h| {
+            found.insert(col, h);
+            ControlFlow::Continue(())
+        })
+        .ok()?;
+    Some(columns.iter().map(|c| found.get(c).copied().flatten()).collect())
+}
+
 fn colour_of(host: &dyn ClientHost, look: Look, state: BlockState, pos: [i32; 3]) -> u32 {
     if look.tint < 0 {
         return look.rgb;
@@ -229,7 +246,7 @@ impl Scanner {
                 .iter()
                 .map(|c| (c.0 * 16 + 8, c.1 * 16 + 8))
                 .collect();
-            let Ok(held) = host.client_surface_heights(&probes, Heightmap::WorldSurface) else {
+            let Some(held) = surface_heights(host, level, &probes) else {
                 return false;
             };
             for (c, h) in wanted.iter().zip(held) {
@@ -320,7 +337,7 @@ impl Scanner {
             .iter()
             .map(|c| (c.0 * 16 + 8, c.1 * 16 + 8))
             .collect();
-        let Ok(held) = host.client_surface_heights(&probes, Heightmap::WorldSurface) else {
+        let Some(held) = surface_heights(host, level, &probes) else {
             return;
         };
         let chosen: Vec<(i32, i32)> = wanted
@@ -339,7 +356,7 @@ impl Scanner {
                 columns.push((c.0 * 16 + (i & 15), c.1 * 16 + (i >> 4)));
             }
         }
-        let Ok(tops) = host.client_surface_heights(&columns, Heightmap::WorldSurface) else {
+        let Some(tops) = surface_heights(host, level, &columns) else {
             return;
         };
         // A chunk at a time, nearest first, until this tick's time is spent (always one).
@@ -526,9 +543,7 @@ pub fn cover_share(
         .iter()
         .map(|(dx, dz)| (x + dx, z + dz))
         .collect();
-    let tops = host
-        .client_surface_heights(&cols, Heightmap::WorldSurface)
-        .ok()?;
+    let tops = surface_heights(host, level, &cols)?;
     let head = feet + 1;
     let reading = cols.iter().zip(tops).map(|(&(cx, cz), top)| {
         let top = top?;

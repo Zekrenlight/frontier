@@ -164,12 +164,23 @@ impl BlockColors {
         let (ns, path) = name.split_once(':').unwrap_or(("minecraft", name));
         let c = Identifier::parse(&format!("{ns}:textures/{path}.png"))
             .ok()
-            .and_then(|id| host.resource(PackType::ClientResources, &id))
-            .and_then(|bytes| png::decode(&bytes))
+            .and_then(|id| read_pack_texture(host, &id))
             .and_then(|img| average(&img.rgba));
         self.textures.insert(name.to_owned(), c);
         c
     }
+}
+
+/// Bytes of a client texture from the winning resource pack.
+fn read_pack_texture(host: &dyn ClientHost, id: &Identifier) -> Option<crate::png::Image> {
+    use std::io::Read;
+    let mut reader = host
+        .open_resource(PackType::ClientResources, id)
+        .ok()
+        .flatten()?;
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).ok()?;
+    png::decode(&bytes)
 }
 
 /// The colour of a picture's pixels, each counted by its opacity; None for a fully clear one.

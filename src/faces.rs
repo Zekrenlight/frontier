@@ -37,6 +37,18 @@ pub struct Faces {
     version: u64,
 }
 
+fn read_pack_png(host: &dyn ClientHost, id: &Identifier) -> Option<crate::png::Image> {
+    use std::io::Read;
+    let mut reader = host
+        .open_resource(mod_api::PackType::ClientResources, id)
+        .ok()
+        .flatten()?;
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).ok()?;
+    crate::png::decode(&bytes)
+}
+
+
 impl Faces {
     /// Where face `key` is in the texture (`[x, y]` in texels), once it has been made.
     pub fn slot(&self, face: &Face) -> Option<[f32; 2]> {
@@ -137,7 +149,7 @@ impl Faces {
     /// Lets the texture go (the maps stopped showing faces).
     pub fn free(&mut self, host: &mut dyn ClientHost) {
         if self.made {
-            let _ = host.free_dynamic_texture(&Identifier::parse(FACES_TEX).expect("valid id"));
+            let _ = host.release_dynamic_texture(&Identifier::parse(FACES_TEX).expect("valid id"));
         }
         *self = Faces {
             broken: self.broken,
@@ -183,8 +195,7 @@ impl Faces {
             let p = p.strip_suffix(".png").unwrap_or(p);
             let img = Identifier::parse(&format!("{ns}:textures/{p}.png"))
                 .ok()
-                .and_then(|id| host.resource(PackType::ClientResources, &id))
-                .and_then(|bytes| png::decode(&bytes))
+                .and_then(|id| read_pack_png(host, &id))
                 .map(|i| (i.width, i.height, i.rgba));
             self.images.insert(path.to_owned(), img);
         }

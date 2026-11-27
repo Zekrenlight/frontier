@@ -8,30 +8,59 @@
 use crate::biomes::BiomeMap;
 use crate::store::{path_part, Column, Disk, MapStore};
 use crate::waypoints::{self, Waypoint};
-use mod_api::{ClientHost, ConfigFileError, ConfigFiles, ConfigPath};
+use mod_api::ClientHost;
 use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 
-/// The bulk data folder, as the map's `Disk`.
-pub struct DataDisk(pub &'static dyn ConfigFiles);
+/// The bulk data folder (`<instance>/sunrise-mod-data/frontier/`), as the map's `Disk`.
+pub struct DataDisk {
+    root: PathBuf,
+}
+
+/// Join `path` under `root`, refusing absolute paths and `..`.
+fn safe_join(root: &Path, path: &str) -> Option<PathBuf> {
+    if path.is_empty() || path.contains('\0') {
+        return None;
+    }
+    let mut out = root.to_path_buf();
+    for c in Path::new(path).components() {
+        match c {
+            Component::Normal(part) => out.push(part),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    out.starts_with(root).then_some(out)
+}
 
 impl Disk for DataDisk {
     fn read(&self, path: &str) -> Option<Vec<u8>> {
-        let p = ConfigPath::new(path).ok()?;
-        match self.0.read(&p) {
+        let p = safe_join(&self.root, path)?;
+        match std::fs::read(&p) {
             Ok(b) => Some(b),
-            Err(ConfigFileError::NotFound) => None,
             Err(_) => None,
         }
     }
     fn write(&self, path: &str, bytes: &[u8]) -> bool {
-        ConfigPath::new(path)
-            .ok()
-            .is_some_and(|p| self.0.write(&p, bytes).is_ok())
+        let Some(p) = safe_join(&self.root, path) else {
+            return false;
+        };
+        if let Some(parent) = p.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return false;
+            }
+        }
+        std::fs::write(&p, bytes).is_ok()
     }
 }
 
 pub fn disk(host: &dyn ClientHost) -> DataDisk {
-    DataDisk(host.data_files())
+    DataDisk {
+        root: host
+            .instance_dir()
+            .join("sunrise-mod-data")
+            .join("frontier"),
+    }
 }
 
 /// A folder name for the server or world being played: the save's folder for a world of your

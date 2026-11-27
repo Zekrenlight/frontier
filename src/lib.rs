@@ -41,17 +41,19 @@ use faces::{Faces, FACES_TEX};
 use crate::widgets::Outcome;
 use mod_api::{
     ClientBlockChangedEvent, ClientChunkLoadEvent, ClientHost, ClientLevelUnloadEvent,
-    ClientPlayerLoggingOutEvent, ClientStoppingEvent, ClientTickPostEvent, CommandEvent,
-    Corner as HudCorner, DrawContext, Flow, Hooks, Identifier, ItemKey, KeyRegistration,
+    ClientPlayerLoggingOutEvent, ClientStoppingEvent, ClientTickPostEvent, Command,
+    CommandArgumentValue, DrawContext, Flow, Host, Hooks, Identifier, ItemKey, KeyRegistration,
     NameTagOptions, RegisterClientCommandsEvent, Registrar, RegistrationContext,
-    RenderFramePreEvent, RenderGuiPostEvent, RenderLevelStage, RenderLevelStageEvent,
+    RenderFramePreEvent, RenderGuiPostEvent,
     ScreenCharTypedPreEvent, ScreenKeyPressedPreEvent, ScreenMouseButtonPressedPreEvent,
     ScreenMouseButtonReleasedPreEvent, ScreenMouseDraggedPreEvent, ScreenMouseScrolledPreEvent,
-    ScreenRenderPostEvent, SettingChangedEvent, SettingSpec, Text, WorldDepth, WorldLine,
+    ScreenRenderPostEvent, SettingChangedEvent, SettingKey, SettingSpec, SettingValue,
+    SubmitCustomGeometryEvent, Text,
+    WorldDepth, WorldLine,
 };
 use scan::{Scanner, Surface};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use store::REGION_SHIFT;
 use ui::{Action, Back, Editor, MenuItem, Page, Request, Ui, MENU_ROW};
@@ -72,7 +74,7 @@ pub fn take_open_settings() -> bool {
 
 #[derive(Default)]
 struct Frontier {
-    s: Mutex<State>,
+    s: Arc<Mutex<State>>,
 }
 
 struct WorldMapTex {
@@ -160,81 +162,150 @@ fn item_key(host: &dyn ClientHost, id: &str) -> Option<ItemKey> {
 fn label(key: &str) -> String {
     format!("frontier.setting.{key}")
 }
-fn toggle(r: &mut dyn Registrar, key: &str, default: bool) {
+fn toggle(r: &mut dyn Registrar, key: &str, default: bool) -> Option<SettingKey> {
     let l = label(key);
-    let _ = r.register_setting(
+    r.register_setting(
         SettingSpec::toggle(key, l.clone(), default).tooltip(format!("{l}.tooltip")),
-    );
+    )
+    .ok()
 }
-fn range(r: &mut dyn Registrar, key: &str, min: f64, max: f64, step: f64, default: f64) {
+fn range(
+    r: &mut dyn Registrar,
+    key: &str,
+    min: f64,
+    max: f64,
+    step: f64,
+    default: f64,
+) -> Option<SettingKey> {
     let l = label(key);
-    let _ = r.register_setting(
+    r.register_setting(
         SettingSpec::range(key, l.clone(), min, max, step, default).tooltip(format!("{l}.tooltip")),
-    );
+    )
+    .ok()
 }
-fn choice(r: &mut dyn Registrar, key: &str, options: &[&str], default: usize) {
+fn choice(r: &mut dyn Registrar, key: &str, options: &[&str], default: usize) -> Option<SettingKey> {
     let l = label(key);
-    let _ = r.register_setting(
+    r.register_setting(
         SettingSpec::choice(key, l.clone(), options.iter().copied(), default)
             .tooltip(format!("{l}.tooltip")),
-    );
+    )
+    .ok()
+}
+
+/// Owner-bound handles returned by `register_setting`, used to read and write settings.
+struct SettingKeys {
+    minimap: Option<SettingKey>,
+    shape: Option<SettingKey>,
+    corner: Option<SettingKey>,
+    size: Option<SettingKey>,
+    zoom: Option<SettingKey>,
+    rotate: Option<SettingKey>,
+    frame: Option<SettingKey>,
+    compass: Option<SettingKey>,
+    coords: Option<SettingKey>,
+    biome: Option<SettingKey>,
+    lighting: Option<SettingKey>,
+    caves: Option<SettingKey>,
+    map_waypoints: Option<SettingKey>,
+    beacons: Option<SettingKey>,
+    labels: Option<SettingKey>,
+    label_range: Option<SettingKey>,
+    death: Option<SettingKey>,
+    slopes: Option<SettingKey>,
+    mobs: Option<SettingKey>,
+    mobs_hostile: Option<SettingKey>,
+    mobs_passive: Option<SettingKey>,
+    mobs_players: Option<SettingKey>,
+    mobs_range: Option<SettingKey>,
+    mobs_fade: Option<SettingKey>,
+    mobs_world_map: Option<SettingKey>,
+    mobs_villagers: Option<SettingKey>,
+    dot_style: Option<SettingKey>,
+    names: Option<SettingKey>,
+    player_names: Option<SettingKey>,
+    items: Option<SettingKey>,
+    objects: Option<SettingKey>,
+    containers: Option<SettingKey>,
+    decor: Option<SettingKey>,
+    sharp: Option<SettingKey>,
+    hide_with_f3: Option<SettingKey>,
+    map_compass: Option<SettingKey>,
+    map_menu: Option<SettingKey>,
+    map_teleport: Option<SettingKey>,
+    accent: Option<SettingKey>,
+}
+
+static SETTING_KEYS: OnceLock<SettingKeys> = OnceLock::new();
+
+fn setting_keys() -> Option<&'static SettingKeys> {
+    SETTING_KEYS.get()
+}
+
+fn bool_of(host: &dyn Host, key: Option<SettingKey>, default: bool) -> bool {
+    key.and_then(|k| host.setting_bool(k).ok()).unwrap_or(default)
+}
+fn f32_of(host: &dyn Host, key: Option<SettingKey>, default: f32) -> f32 {
+    key.and_then(|k| host.setting_f64(k).ok())
+        .filter(|v| v.is_finite())
+        .map_or(default, |v| v as f32)
+}
+fn choice_of(host: &dyn Host, key: Option<SettingKey>, default: u32) -> u32 {
+    key.and_then(|k| host.setting_choice(k).ok()).unwrap_or(default)
+}
+
+/// The cards' accent (`#F9801D` until the player picks another).
+fn accent_color(host: &dyn Host) -> u32 {
+    0xFF00_0000
+        | (setting_keys()
+            .and_then(|k| k.accent)
+            .and_then(|k| host.setting_color(k).ok())
+            .unwrap_or(0xF9801D)
+            & 0xFF_FFFF)
 }
 
 /// Reads every setting into the copy the rest of the mod uses.
-fn sync(host: &dyn ClientHost) {
+fn sync(host: &dyn Host) {
     let d = Config::default();
-    let b = |key: &str, default: bool| host.setting_bool(key).unwrap_or(default);
-    let n = |key: &str, default: f32| {
-        host.setting_f64(key)
-            .filter(|v| v.is_finite())
-            .map_or(default, |v| v as f32)
-    };
-    let c = |key: &str| host.setting_choice(key).unwrap_or(0);
+    let Some(k) = setting_keys() else { return };
     set_config(Config {
-        minimap: b(KEY_MINIMAP, d.minimap),
-        shape: host
-            .setting_choice(KEY_SHAPE)
-            .map_or(d.shape, Shape::from_index),
-        corner: Corner::from_index(c(KEY_CORNER)),
-        size: n(KEY_SIZE, d.size).clamp(64.0, 192.0),
-        zoom: n(KEY_ZOOM, d.zoom as f32).round().clamp(1.0, 5.0) as u32,
-        rotate: b(KEY_ROTATE, d.rotate),
-        frame: host
-            .setting_choice(KEY_FRAME)
-            .map_or(d.frame, FrameStyle::from_index),
-        compass: b(KEY_COMPASS, d.compass),
-        coords: b(KEY_COORDS, d.coords),
-        biome: b(KEY_BIOME, d.biome),
-        lighting: b(KEY_LIGHTING, d.lighting),
-        caves: b(KEY_CAVES, d.caves),
-        map_waypoints: b(KEY_MAP_WAYPOINTS, d.map_waypoints),
-        beacons: b(KEY_BEACONS, d.beacons),
-        labels: b(KEY_LABELS, d.labels),
-        label_range: n(KEY_LABEL_RANGE, d.label_range).clamp(0.0, 10_000.0),
-        death: b(KEY_DEATH, d.death),
-        slopes: b(KEY_SLOPES, d.slopes),
-        mobs: b(KEY_MOBS, d.mobs),
-        mobs_hostile: b(KEY_MOBS_HOSTILE, d.mobs_hostile),
-        mobs_passive: b(KEY_MOBS_PASSIVE, d.mobs_passive),
-        mobs_players: b(KEY_MOBS_PLAYERS, d.mobs_players),
-        mobs_range: n(KEY_MOBS_RANGE, d.mobs_range).clamp(0.0, 256.0),
-        mobs_fade: b(KEY_MOBS_FADE, d.mobs_fade),
-        mobs_world_map: b(KEY_MOBS_WORLD_MAP, d.mobs_world_map),
-        mobs_villagers: b(KEY_MOBS_VILLAGERS, d.mobs_villagers),
-        dot_style: host
-            .setting_choice(KEY_DOT_STYLE)
-            .map_or(d.dot_style, DotStyle::from_index),
-        names: Names::from_index(c(KEY_NAMES)),
-        player_names: b(KEY_PLAYER_NAMES, d.player_names),
-        items: b(KEY_ITEMS, d.items),
-        objects: b(KEY_OBJECTS, d.objects),
-        containers: b(KEY_CONTAINERS, d.containers),
-        decor: b(KEY_DECOR, d.decor),
-        sharp: b(KEY_SHARP, d.sharp),
-        hide_with_f3: b(KEY_HIDE_F3, d.hide_with_f3),
-        map_compass: b(KEY_MAP_COMPASS, d.map_compass),
-        map_menu: b(KEY_MAP_MENU, d.map_menu),
-        map_teleport: b(KEY_MAP_TELEPORT, d.map_teleport),
+        minimap: bool_of(host, k.minimap, d.minimap),
+        shape: Shape::from_index(choice_of(host, k.shape, d.shape.index())),
+        corner: Corner::from_index(choice_of(host, k.corner, 0)),
+        size: f32_of(host, k.size, d.size).clamp(64.0, 192.0),
+        zoom: f32_of(host, k.zoom, d.zoom as f32).round().clamp(1.0, 5.0) as u32,
+        rotate: bool_of(host, k.rotate, d.rotate),
+        frame: FrameStyle::from_index(choice_of(host, k.frame, d.frame.index())),
+        compass: bool_of(host, k.compass, d.compass),
+        coords: bool_of(host, k.coords, d.coords),
+        biome: bool_of(host, k.biome, d.biome),
+        lighting: bool_of(host, k.lighting, d.lighting),
+        caves: bool_of(host, k.caves, d.caves),
+        map_waypoints: bool_of(host, k.map_waypoints, d.map_waypoints),
+        beacons: bool_of(host, k.beacons, d.beacons),
+        labels: bool_of(host, k.labels, d.labels),
+        label_range: f32_of(host, k.label_range, d.label_range).clamp(0.0, 10_000.0),
+        death: bool_of(host, k.death, d.death),
+        slopes: bool_of(host, k.slopes, d.slopes),
+        mobs: bool_of(host, k.mobs, d.mobs),
+        mobs_hostile: bool_of(host, k.mobs_hostile, d.mobs_hostile),
+        mobs_passive: bool_of(host, k.mobs_passive, d.mobs_passive),
+        mobs_players: bool_of(host, k.mobs_players, d.mobs_players),
+        mobs_range: f32_of(host, k.mobs_range, d.mobs_range).clamp(0.0, 256.0),
+        mobs_fade: bool_of(host, k.mobs_fade, d.mobs_fade),
+        mobs_world_map: bool_of(host, k.mobs_world_map, d.mobs_world_map),
+        mobs_villagers: bool_of(host, k.mobs_villagers, d.mobs_villagers),
+        dot_style: DotStyle::from_index(choice_of(host, k.dot_style, 1)),
+        names: Names::from_index(choice_of(host, k.names, 0)),
+        player_names: bool_of(host, k.player_names, d.player_names),
+        items: bool_of(host, k.items, d.items),
+        objects: bool_of(host, k.objects, d.objects),
+        containers: bool_of(host, k.containers, d.containers),
+        decor: bool_of(host, k.decor, d.decor),
+        sharp: bool_of(host, k.sharp, d.sharp),
+        hide_with_f3: bool_of(host, k.hide_with_f3, d.hide_with_f3),
+        map_compass: bool_of(host, k.map_compass, d.map_compass),
+        map_menu: bool_of(host, k.map_menu, d.map_menu),
+        map_teleport: bool_of(host, k.map_teleport, d.map_teleport),
     });
 }
 
@@ -1002,6 +1073,25 @@ fn face_rim(draw: &mut dyn DrawContext, x: f32, y: f32, kind: radar::Kind, alpha
     );
 }
 
+
+/// Top-left of a `w` x `h` box in `corner`, 2px in from the screen edge (the
+/// game's old HUD `corners.place` margin).
+fn place_hud(draw: &dyn DrawContext, corner: Corner, w: f32, h: f32) -> (f32, f32) {
+    const MARGIN: f32 = 2.0;
+    let [width, height] = draw.size();
+    let x = if corner.right() {
+        width - MARGIN - w
+    } else {
+        MARGIN
+    };
+    let y = if corner.bottom() {
+        height - MARGIN - h
+    } else {
+        MARGIN
+    };
+    (x, y)
+}
+
 /// A name the game takes for a player head (`ExtraCodecs.PLAYER_NAME`).
 fn valid_player_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 16 && name.bytes().all(|b| (0x21..=0x7E).contains(&b))
@@ -1021,17 +1111,14 @@ fn player_head(draw: &mut dyn DrawContext, name: &str, x: f32, y: f32, alpha: f3
         hat: true,
         fallback: None,
     }));
-    draw.gui_paint(&[
-        mod_api::GuiDraw::Push(vec![PoseOp::Translate(x - 4.0, y - 4.0)]),
-        mod_api::GuiDraw::Text {
-            text: head,
-            x: 0,
-            y: 0,
-            color: radar::fade(0xFF_FFFFFF, alpha),
-            shadow: false,
-        },
-        mod_api::GuiDraw::Pop,
-    ])
+    let color = radar::fade(0xFF_FFFFFF, alpha);
+    draw.draw_gui(&mut |canvas| {
+        canvas.scope(
+            &[PoseOp::Translate(x - 4.0, y - 4.0)],
+            None,
+            &mut |c| c.text(&head, [0.0, 0.0], color, false),
+        )
+    })
     .is_ok()
 }
 
@@ -1190,15 +1277,12 @@ impl Frontier {
             }
         }
         let text_h = lines.len() as f32 * 10.0;
-        let corner = match cfg.corner {
-            Corner::TopRight => HudCorner::TopRight,
-            Corner::TopLeft => HudCorner::TopLeft,
-            Corner::BottomRight => HudCorner::BottomRight,
-            Corner::BottomLeft => HudCorner::BottomLeft,
-        };
-        let (x, y) = event.corners.place(corner, pic, pic + text_h);
-        let (x, y) = (x.round(), y.round());
         let draw = &mut *event.draw;
+        // Same 2px edge gap the game's HUD corner helper used (`extras_hud::MARGIN`).
+        // RenderGuiPostEvent no longer supplies a stacking `corners` cursor, so this
+        // does not reserve space for vanilla status-effect icons in the top right.
+        let (x, y) = place_hud(draw, cfg.corner, pic, pic + text_h);
+        let (x, y) = (x.round(), y.round());
         // With text above the map in the bottom corners, below it in the top ones.
         let (map_y, text_y) = if cfg.corner.bottom() {
             (y + text_h, y)
@@ -1503,7 +1587,7 @@ fn draw_layer_controls(
     w: f32,
     mouse: [f32; 2],
 ) {
-    let accent = 0xFF00_0000 | (host.setting_color("accent").unwrap_or(0xF9801D) & 0xFF_FFFF);
+    let accent = accent_color(host);
     let card = |draw: &mut dyn DrawContext, [x, y, sw, sh]: [f32; 4]| {
         draw.fill([x + 1.0, y + 1.0, sw, sh], 0x60_000000);
         draw.fill([x, y, sw, sh], 0xF4_0F1118);
@@ -1611,7 +1695,7 @@ fn draw_menu(
     mouse: [f32; 2],
 ) {
     // The shared Sunrise dark card: #0F1118 with an accent top edge and charcoal lines.
-    let accent = 0xFF00_0000 | (host.setting_color("accent").unwrap_or(0xF9801D) & 0xFF_FFFF);
+    let accent = accent_color(host);
     let [x, y, mw, mh] = menu.rect(w, h);
     draw.fill([x + 2.0, y + 2.0, mw, mh], 0x60_000000);
     draw.fill([x, y, mw, mh], 0xF4_0F1118);
@@ -1696,7 +1780,7 @@ fn draw_help(
     w: f32,
     h: f32,
 ) {
-    let accent = 0xFF00_0000 | (host.setting_color("accent").unwrap_or(0xF9801D) & 0xFF_FFFF);
+    let accent = accent_color(host);
     let [bx, by, bw, bh] = button;
     draw.fill([bx, by, bw, bh], if open { accent } else { 0xFF_1E2330 });
     let q = "?";
@@ -1739,6 +1823,51 @@ fn bound(host: &dyn ClientHost, name: &str, key: &str) -> bool {
         .is_ok_and(|k| k == key && k != "key.keyboard.unknown")
 }
 
+
+/// `/frontier` and its subcommands, run from the client command dispatcher.
+fn run_frontier_command(
+    state: &Mutex<State>,
+    host: &mut dyn ClientHost,
+    action: &str,
+    name: Option<&str>,
+) -> Option<i32> {
+    let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
+    match action {
+        "" => st.open = Some(Page::Menu),
+        "map" => {
+            st.open_world_map();
+            st.open = Some(Page::Map);
+        }
+        "waypoints" => st.open = Some(Page::List),
+        "settings" => OPEN_SETTINGS.store(true, Ordering::Relaxed),
+        "add" => {
+            let pos = st.block_pos().unwrap_or([0; 3]);
+            let mut e = st.new_waypoint_editor(pos, Back::Game, host);
+            if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
+                // Named on the command line: added at once.
+                let w = Waypoint {
+                    name: name.chars().take(32).collect(),
+                    pos,
+                    color: e.color,
+                    shown: true,
+                    kind: Kind::Normal,
+                };
+                let msg = tr(host, "frontier.notice.added").replace("%s", &w.name);
+                if let Some(world) = st.world.as_mut() {
+                    world.waypoints.push(w);
+                    world.waypoints_dirty = true;
+                    st.notice(msg);
+                }
+            } else {
+                e.back = Back::Game;
+                st.open = Some(Page::Edit(e));
+            }
+        }
+        _ => st.open = Some(Page::Menu),
+    }
+    Some(1)
+}
+
 #[mod_api::sunrise_mod]
 impl Hooks for Frontier {
     fn register(&self, r: &mut dyn Registrar, _cx: &RegistrationContext) {
@@ -1750,59 +1879,64 @@ impl Hooks for Frontier {
             );
         }
         let d = Config::default();
-        toggle(r, KEY_MINIMAP, d.minimap);
-        choice(r, KEY_SHAPE, &Shape::OPTIONS, d.shape.index() as usize);
-        choice(r, KEY_CORNER, &Corner::OPTIONS, 0);
-        range(r, KEY_SIZE, 64.0, 192.0, 8.0, f64::from(d.size));
-        range(r, KEY_ZOOM, 1.0, 5.0, 1.0, f64::from(d.zoom));
-        toggle(r, KEY_ROTATE, d.rotate);
-        choice(r, KEY_FRAME, &FrameStyle::OPTIONS, d.frame.index() as usize);
-        toggle(r, KEY_COMPASS, d.compass);
-        toggle(r, KEY_COORDS, d.coords);
-        toggle(r, KEY_BIOME, d.biome);
-        toggle(r, KEY_LIGHTING, d.lighting);
-        toggle(r, KEY_SLOPES, d.slopes);
-        toggle(r, KEY_CAVES, d.caves);
-        toggle(r, KEY_MAP_WAYPOINTS, d.map_waypoints);
-        toggle(r, KEY_BEACONS, d.beacons);
-        toggle(r, KEY_LABELS, d.labels);
-        range(
-            r,
-            KEY_LABEL_RANGE,
-            0.0,
-            2000.0,
-            50.0,
-            f64::from(d.label_range),
-        );
-        toggle(r, KEY_DEATH, d.death);
-        toggle(r, KEY_MOBS, d.mobs);
-        toggle(r, KEY_MOBS_HOSTILE, d.mobs_hostile);
-        toggle(r, KEY_MOBS_PASSIVE, d.mobs_passive);
-        toggle(r, KEY_MOBS_PLAYERS, d.mobs_players);
-        range(r, KEY_MOBS_RANGE, 0.0, 256.0, 8.0, f64::from(d.mobs_range));
-        toggle(r, KEY_MOBS_FADE, d.mobs_fade);
-        toggle(r, KEY_MOBS_VILLAGERS, d.mobs_villagers);
-        toggle(r, KEY_MOBS_WORLD_MAP, d.mobs_world_map);
-        choice(r, KEY_DOT_STYLE, &DotStyle::OPTIONS, 1);
-        choice(r, KEY_NAMES, &Names::OPTIONS, 0);
-        toggle(r, KEY_PLAYER_NAMES, d.player_names);
-        toggle(r, KEY_ITEMS, d.items);
-        toggle(r, KEY_OBJECTS, d.objects);
-        toggle(r, KEY_CONTAINERS, d.containers);
-        toggle(r, KEY_DECOR, d.decor);
-        toggle(r, KEY_SHARP, d.sharp);
-        toggle(r, KEY_HIDE_F3, d.hide_with_f3);
-        toggle(r, KEY_MAP_COMPASS, d.map_compass);
-        toggle(r, KEY_MAP_MENU, d.map_menu);
-        toggle(r, KEY_MAP_TELEPORT, d.map_teleport);
-        // The accent colour of frontier's cards (Sunrise orange by default).
-        let _ = r.register_setting(
-            mod_api::SettingSpec::color("accent", "frontier.setting.accent", 0xF9801D)
-                .tooltip("frontier.setting.accent.tooltip"),
-        );
+        let keys = SettingKeys {
+            minimap: toggle(r, KEY_MINIMAP, d.minimap),
+            shape: choice(r, KEY_SHAPE, &Shape::OPTIONS, d.shape.index() as usize),
+            corner: choice(r, KEY_CORNER, &Corner::OPTIONS, 0),
+            size: range(r, KEY_SIZE, 64.0, 192.0, 8.0, f64::from(d.size)),
+            zoom: range(r, KEY_ZOOM, 1.0, 5.0, 1.0, f64::from(d.zoom)),
+            rotate: toggle(r, KEY_ROTATE, d.rotate),
+            frame: choice(r, KEY_FRAME, &FrameStyle::OPTIONS, d.frame.index() as usize),
+            compass: toggle(r, KEY_COMPASS, d.compass),
+            coords: toggle(r, KEY_COORDS, d.coords),
+            biome: toggle(r, KEY_BIOME, d.biome),
+            lighting: toggle(r, KEY_LIGHTING, d.lighting),
+            slopes: toggle(r, KEY_SLOPES, d.slopes),
+            caves: toggle(r, KEY_CAVES, d.caves),
+            map_waypoints: toggle(r, KEY_MAP_WAYPOINTS, d.map_waypoints),
+            beacons: toggle(r, KEY_BEACONS, d.beacons),
+            labels: toggle(r, KEY_LABELS, d.labels),
+            label_range: range(
+                r,
+                KEY_LABEL_RANGE,
+                0.0,
+                2000.0,
+                50.0,
+                f64::from(d.label_range),
+            ),
+            death: toggle(r, KEY_DEATH, d.death),
+            mobs: toggle(r, KEY_MOBS, d.mobs),
+            mobs_hostile: toggle(r, KEY_MOBS_HOSTILE, d.mobs_hostile),
+            mobs_passive: toggle(r, KEY_MOBS_PASSIVE, d.mobs_passive),
+            mobs_players: toggle(r, KEY_MOBS_PLAYERS, d.mobs_players),
+            mobs_range: range(r, KEY_MOBS_RANGE, 0.0, 256.0, 8.0, f64::from(d.mobs_range)),
+            mobs_fade: toggle(r, KEY_MOBS_FADE, d.mobs_fade),
+            mobs_villagers: toggle(r, KEY_MOBS_VILLAGERS, d.mobs_villagers),
+            mobs_world_map: toggle(r, KEY_MOBS_WORLD_MAP, d.mobs_world_map),
+            dot_style: choice(r, KEY_DOT_STYLE, &DotStyle::OPTIONS, 1),
+            names: choice(r, KEY_NAMES, &Names::OPTIONS, 0),
+            player_names: toggle(r, KEY_PLAYER_NAMES, d.player_names),
+            items: toggle(r, KEY_ITEMS, d.items),
+            objects: toggle(r, KEY_OBJECTS, d.objects),
+            containers: toggle(r, KEY_CONTAINERS, d.containers),
+            decor: toggle(r, KEY_DECOR, d.decor),
+            sharp: toggle(r, KEY_SHARP, d.sharp),
+            hide_with_f3: toggle(r, KEY_HIDE_F3, d.hide_with_f3),
+            map_compass: toggle(r, KEY_MAP_COMPASS, d.map_compass),
+            map_menu: toggle(r, KEY_MAP_MENU, d.map_menu),
+            map_teleport: toggle(r, KEY_MAP_TELEPORT, d.map_teleport),
+            // The accent colour of frontier's cards (Sunrise orange by default).
+            accent: r
+                .register_setting(
+                    SettingSpec::color("accent", "frontier.setting.accent", 0xF9801D)
+                        .tooltip("frontier.setting.accent.tooltip"),
+                )
+                .ok(),
+        };
+        let _ = SETTING_KEYS.set(keys);
     }
 
-    fn setting_changed(&self, host: &mut dyn ClientHost, event: &mut SettingChangedEvent<'_>) {
+    fn setting_changed(&self, host: &dyn Host, event: &mut SettingChangedEvent<'_>) {
         if event.mod_id == ID {
             sync(host);
         }
@@ -1921,13 +2055,17 @@ impl Hooks for Frontier {
             zoom = (zoom + 1).min(5);
         }
         if zoom != cfg.zoom {
-            host.set_setting(ID, KEY_ZOOM, &zoom.to_string());
+            if let Some(key) = setting_keys().and_then(|k| k.zoom) {
+                let _ = host.set_setting(key, SettingValue::Range(f64::from(zoom)));
+            }
             cfg.zoom = zoom;
             set_config(cfg);
         }
         if click(host, "toggle_minimap") {
             cfg.minimap = !cfg.minimap;
-            host.set_setting(ID, KEY_MINIMAP, if cfg.minimap { "true" } else { "false" });
+            if let Some(key) = setting_keys().and_then(|k| k.minimap) {
+                let _ = host.set_setting(key, SettingValue::Toggle(cfg.minimap));
+            }
             set_config(cfg);
         }
         // Reading the world.
@@ -2132,7 +2270,7 @@ impl Hooks for Frontier {
         let g = frame::geo(cfg.sharp);
         if st.mini_tex && st.mini_side != g.texels() {
             // Sharp maps changed: a texture of the new size.
-            let _ = host.free_dynamic_texture(&Identifier::parse(MINIMAP_TEX).expect("valid id"));
+            let _ = host.release_dynamic_texture(&Identifier::parse(MINIMAP_TEX).expect("valid id"));
             st.mini_tex = false;
             st.last_view = None;
         }
@@ -2237,7 +2375,7 @@ impl Hooks for Frontier {
         }
         if !open {
             if st.world_tex.take().is_some() {
-                let _ = host.free_dynamic_texture(&Identifier::parse(WORLD_TEX).expect("valid id"));
+                let _ = host.release_dynamic_texture(&Identifier::parse(WORLD_TEX).expect("valid id"));
             }
             return;
         }
@@ -2296,7 +2434,7 @@ impl Hooks for Frontier {
             .is_some_and(|t| !fits(t) || t.size != size)
         {
             // The window or the setting changed: a texture to match.
-            let _ = host.free_dynamic_texture(&Identifier::parse(WORLD_TEX).expect("valid id"));
+            let _ = host.release_dynamic_texture(&Identifier::parse(WORLD_TEX).expect("valid id"));
             st.world_tex = None;
         }
         if st.world_tex.is_none() {
@@ -2703,61 +2841,43 @@ impl Hooks for Frontier {
         _host: &mut dyn ClientHost,
         event: &mut RegisterClientCommandsEvent<'_>,
     ) {
-        for usage in [
-            "frontier",
-            "frontier map",
-            "frontier waypoints",
-            "frontier settings",
-            "frontier add [name:text]",
-        ] {
-            event.commands.push(mod_api::Command::new(usage));
-        }
-    }
-
-    fn command(&self, host: &mut dyn ClientHost, event: &mut CommandEvent<'_>) -> Flow {
-        let mut words = event.command.trim().splitn(3, ' ');
-        if words.next() != Some("frontier") {
-            return Flow::Continue;
-        }
-        let mut st = self.s.lock().unwrap_or_else(|e| e.into_inner());
-        match words.next() {
-            None | Some("") => st.open = Some(Page::Menu),
-            Some("map") => {
-                st.open_world_map();
-                st.open = Some(Page::Map);
-            }
-            Some("waypoints") => st.open = Some(Page::List),
-            Some("settings") => OPEN_SETTINGS.store(true, Ordering::Relaxed),
-            Some("add") => {
-                let pos = st.block_pos().unwrap_or([0; 3]);
-                let mut e = st.new_waypoint_editor(pos, Back::Game, host);
-                if let Some(name) = words.next().map(str::trim).filter(|n| !n.is_empty()) {
-                    // Named on the command line: added at once.
-                    let w = Waypoint {
-                        name: name.chars().take(32).collect(),
-                        pos,
-                        color: e.color,
-                        shown: true,
-                        kind: Kind::Normal,
+        let state = Arc::clone(&self.s);
+        event.commands.push(Command::new("frontier").executes_client({
+            let state = Arc::clone(&state);
+            move |host, _inv| run_frontier_command(&state, host, "", None)
+        }));
+        event.commands.push(Command::new("frontier map").executes_client({
+            let state = Arc::clone(&state);
+            move |host, _inv| run_frontier_command(&state, host, "map", None)
+        }));
+        event.commands.push(Command::new("frontier waypoints").executes_client({
+            let state = Arc::clone(&state);
+            move |host, _inv| run_frontier_command(&state, host, "waypoints", None)
+        }));
+        event.commands.push(Command::new("frontier settings").executes_client({
+            let state = Arc::clone(&state);
+            move |host, _inv| run_frontier_command(&state, host, "settings", None)
+        }));
+        event.commands.push(
+            Command::new("frontier add [name:text]").executes_client({
+                let state = Arc::clone(&state);
+                move |host, inv| {
+                    let name = match inv.argument("name") {
+                        Some(CommandArgumentValue::String(s)) => Some(s.as_str()),
+                        _ => None,
                     };
-                    let msg = tr(host, "frontier.notice.added").replace("%s", &w.name);
-                    if let Some(world) = st.world.as_mut() {
-                        world.waypoints.push(w);
-                        world.waypoints_dirty = true;
-                        st.notice(msg);
-                    }
-                } else {
-                    e.back = Back::Game;
-                    st.open = Some(Page::Edit(e));
+                    run_frontier_command(&state, host, "add", name)
                 }
-            }
-            Some(_) => st.open = Some(Page::Menu),
-        }
-        Flow::Cancel
+            }),
+        );
     }
 
-    fn render_level_stage(&self, host: &dyn ClientHost, event: &mut RenderLevelStageEvent<'_>) {
-        if event.stage != RenderLevelStage::AfterLevel || !host.on(ID) {
+    fn submit_custom_geometry(
+        &self,
+        host: &dyn ClientHost,
+        event: &mut SubmitCustomGeometryEvent<'_>,
+    ) {
+        if !host.on(ID) {
             return;
         }
         let cfg = config();
@@ -2766,7 +2886,7 @@ impl Hooks for Frontier {
         }
         let st = self.s.lock().unwrap_or_else(|e| e.into_inner());
         let Some(world) = &st.world else { return };
-        let cam = event.view.camera;
+        let cam = event.view.camera.position;
         let mut shown: Vec<(&Waypoint, f64)> = world
             .waypoints
             .iter()
