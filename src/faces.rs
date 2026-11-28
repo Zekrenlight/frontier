@@ -19,6 +19,8 @@ pub const FACES_TEX: &str = "frontier:dynamic/faces";
 /// Faces across (and down) the texture.
 const PER_ROW: usize = 16;
 const SIDE: usize = PER_ROW * 8;
+/// Whole faces atlas side in texels (16 faces of 8 px).
+pub const FACES_SIDE: i32 = SIDE as i32;
 
 #[derive(Default)]
 pub struct Faces {

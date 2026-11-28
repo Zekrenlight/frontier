@@ -205,4 +205,33 @@ mod tests {
         assert!(moved && (v - 60.0).abs() < 1e-3 && (u - 30.0).abs() < 1e-3);
         assert!(!clamp_to_map(g, Shape::Square, 5.0, 5.0, 4.0).2);
     }
+
+
+    #[test]
+    fn compose_writes_non_transparent_rgba() {
+        use crate::frame::CLASSIC;
+        let g = CLASSIC;
+        let n = g.texels();
+        let inside = vec![true; n * n];
+        let frame_px = vec![0u32; n * n];
+        let v = View {
+            cx: 0.0,
+            cz: 0.0,
+            yaw: 0.0,
+            rotate: false,
+            bpp: 1.0,
+        };
+        let mut out = Vec::new();
+        compose(&v, g, &inside, &frame_px, |_x, _z| 0xFF_44_88_CC, &mut out);
+        assert_eq!(out.len(), n * n * 4);
+        let mut opaque = 0usize;
+        for px in out.chunks_exact(4) {
+            if px[3] != 0 {
+                opaque += 1;
+                assert_eq!(px, [0x44, 0x88, 0xCC, 0xFF]);
+            }
+        }
+        assert_eq!(opaque, n * n, "map texels should be opaque RGBA, not clear");
+    }
+
 }

@@ -37,12 +37,12 @@ pub mod world;
 pub use config::*;
 
 use colors::BlockColors;
-use faces::{Faces, FACES_TEX};
+use faces::{Faces, FACES_SIDE, FACES_TEX};
 use crate::widgets::Outcome;
 use mod_api::{
     ClientBlockChangedEvent, ClientChunkLoadEvent, ClientHost, ClientLevelUnloadEvent,
     ClientPlayerLoggingOutEvent, ClientStoppingEvent, ClientTickPostEvent, Command,
-    CommandArgumentValue, DrawContext, Flow, Host, Hooks, Identifier, ItemKey, KeyRegistration,
+    CommandArgumentValue, DrawContext, Flow, GuiBlitRegion, Host, Hooks, Identifier, ItemKey, KeyRegistration,
     NameTagOptions, RegisterClientCommandsEvent, Registrar, RegistrationContext,
     RenderFramePreEvent, RenderGuiPostEvent,
     ScreenCharTypedPreEvent, ScreenKeyPressedPreEvent, ScreenMouseButtonPressedPreEvent,
@@ -1028,11 +1028,13 @@ fn draw_dot(
                             // says "passive" at a glance.
                             face_rim(draw, x, y, d.kind, alpha);
                             let tint = radar::fade(0xFF_FFFFFF, alpha);
-                            draw.sprite(
+                            dynamic_texture(
+                                draw,
                                 FACES_TEX,
+                                [FACES_SIDE, FACES_SIDE],
                                 [u, v, 8.0, 8.0],
                                 [x - 4.0, y - 4.0, 8.0, 8.0],
-                                Some(tint),
+                                tint,
                             );
                             true
                         }
@@ -1099,6 +1101,29 @@ fn valid_player_name(name: &str) -> bool {
 
 /// Player `name`'s head centred on `(x, y)`, drawn by the game as it draws a head in chat
 /// (the face of their skin with its hat layer): the same source and look as chat heads.
+
+/// Draw a live dynamic texture. `DrawContext::sprite` only looks in the GUI atlas;
+/// ba1f24e draws these with `GuiCanvas::texture` inside `draw_gui`. `src` is
+/// `[u, v, w, h]` in texels, `tex` is the whole texture's pixel size, `dst` is
+/// `[x, y, w, h]` in GUI pixels, and `argb` tints (`0xFFFF_FFFF` is un-tinted).
+fn dynamic_texture(
+    draw: &mut dyn DrawContext,
+    id: &str,
+    tex: [i32; 2],
+    src: [f32; 4],
+    dst: [f32; 4],
+    argb: u32,
+) -> bool {
+    let id = Identifier::parse(id).expect("valid id");
+    let region = GuiBlitRegion {
+        uv: [src[0], src[1]],
+        src: [src[2] as i32, src[3] as i32],
+        tex,
+    };
+    draw.draw_gui(&mut |canvas| canvas.texture(&id, dst, region, argb))
+        .is_ok()
+}
+
 fn player_head(draw: &mut dyn DrawContext, name: &str, x: f32, y: f32, alpha: f32) -> bool {
     use mod_api::client::hud_layout::PoseOp;
     use mod_api::text::{Text, TextContent, TextObject, TextProfile};
@@ -1290,7 +1315,15 @@ impl Frontier {
             (y, y + pic)
         };
         let t = st.mini_side as f32;
-        draw.sprite(MINIMAP_TEX, [0.0, 0.0, t, t], [x, map_y, pic, pic], None);
+        let side = t as i32;
+        dynamic_texture(
+            draw,
+            MINIMAP_TEX,
+            [side, side],
+            [0.0, 0.0, t, t],
+            [x, map_y, pic, pic],
+            0xFFFF_FFFF,
+        );
         let (cx, cy) = (x + pic / 2.0, map_y + pic / 2.0);
         // Dots, waypoints, the arrow and the compass are placed by the very view the picture
         // under them was made for (the camera's smooth place that frame), so they move with the
@@ -1426,11 +1459,13 @@ impl Frontier {
                     snap(((cz - m.cz) / bpg) as f32),
                 );
                 if zoom == m.zoom && size == st.ui.size {
-                    draw.sprite(
+                    dynamic_texture(
+                        draw,
                         WORLD_TEX,
+                        [t.w as i32, t.h as i32],
                         [0.0, 0.0, t.w as f32, t.h as f32],
                         [ox, oy, w, h],
-                        None,
+                        0xFFFF_FFFF,
                     );
                 }
             }
